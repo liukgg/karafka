@@ -22,22 +22,22 @@ RSpec.describe Karafka::Connection::QueueConsumer do
   subject { described_class.new(route) }
 
   describe 'preconditions' do
-    it 'should have socket timeout bigger then wait timeout' do
+    it 'has socket timeout bigger then wait timeout' do
       expect(max_wait_ms < socket_timeout_ms).to be true
     end
   end
 
   describe '.new' do
-    it 'should just remember route' do
+    it 'just remembers route' do
       expect(subject.instance_variable_get(:@route)).to eq route
     end
   end
 
   describe '#fetch' do
     let(:target) { double }
-    let(:options) { rand }
     let(:partition) { rand }
     let(:message_bulk) { double }
+    let(:lambda_return) { double }
 
     context 'when everything is ok' do
       before do
@@ -47,7 +47,7 @@ RSpec.describe Karafka::Connection::QueueConsumer do
 
         expect(target)
           .to receive(:fetch)
-          .with(options)
+          .with(commit: false)
           .and_yield(partition, message_bulk)
           .and_return(true)
 
@@ -58,13 +58,19 @@ RSpec.describe Karafka::Connection::QueueConsumer do
           .not_to receive(:sleep)
       end
 
-      it 'should forward to target and fetch' do
+      it 'forwards to target, fetch and commit' do
         fetch = lambda do
-          subject.fetch(options) do |rec_partition, rec_message_bulk|
+          subject.fetch do |rec_partition, rec_message_bulk|
             expect(rec_partition).to eq partition
             expect(rec_message_bulk).to eq message_bulk
+
+            lambda_return
           end
         end
+
+        expect(subject)
+          .to receive(:commit)
+          .with(partition, lambda_return)
 
         expect { fetch.call }.not_to raise_error
       end
@@ -79,13 +85,13 @@ RSpec.describe Karafka::Connection::QueueConsumer do
               .and_raise(error)
           end
 
-          it 'should try closing the connection' do
+          it 'tries closing the connection' do
             expect(subject)
               .to receive(:close)
 
             block = -> {}
 
-            expect { subject.fetch(options, &block) }.not_to raise_error
+            expect { subject.fetch(&block) }.not_to raise_error
           end
         end
       end
@@ -99,7 +105,6 @@ RSpec.describe Karafka::Connection::QueueConsumer do
 
         expect(target)
           .to receive(:fetch)
-          .with(options)
           .and_return(false)
 
         expect(subject)
@@ -110,9 +115,9 @@ RSpec.describe Karafka::Connection::QueueConsumer do
           .with(described_class::CLAIM_SLEEP_TIME)
       end
 
-      it 'should close the connection and wait' do
+      it 'closes the connection and wait' do
         fetch = lambda do
-          subject.fetch(options)
+          subject.fetch
         end
 
         expect { fetch.call }.not_to raise_error
@@ -127,15 +132,15 @@ RSpec.describe Karafka::Connection::QueueConsumer do
           .to receive(:new)
           .with(
             route.group.to_s,
-            ::Karafka::App.config.kafka_hosts,
-            ::Karafka::App.config.zookeeper_hosts,
+            ::Karafka::App.config.kafka.hosts,
+            ::Karafka::App.config.zookeeper.hosts,
             route.topic.to_s,
             socket_timeout_ms: socket_timeout_ms,
             max_wait_ms: max_wait_ms
           )
       end
 
-      it 'should create Poseidon::ConsumerGroup instance' do
+      it 'creates Poseidon::ConsumerGroup instance' do
         expect(subject)
           .not_to receive(:close)
 
@@ -152,13 +157,48 @@ RSpec.describe Karafka::Connection::QueueConsumer do
               .and_raise(error)
           end
 
-          it 'should try to close it' do
+          it 'tries to close it' do
             expect(subject)
               .to receive(:close)
 
             subject.send(:target)
           end
         end
+      end
+    end
+  end
+
+  describe '#commit' do
+    let(:partition) { rand(1000) }
+    let(:target) { double }
+
+    before do
+      allow(subject)
+        .to receive(:target)
+        .and_return(target)
+    end
+
+    context 'when there is no last processed message' do
+      let(:last_processed_message) { nil }
+
+      it 'expect not to commit anything' do
+        expect(target)
+          .not_to receive(:commit)
+
+        subject.send(:commit, partition, last_processed_message)
+      end
+    end
+
+    context 'when there is last processed message' do
+      let(:offset) { rand(1000) }
+      let(:last_processed_message) { double(offset: offset) }
+
+      it 'expect to commit based on its offset' do
+        expect(target)
+          .to receive(:commit)
+          .with(partition, offset + 1)
+
+        subject.send(:commit, partition, last_processed_message)
       end
     end
   end
@@ -172,7 +212,7 @@ RSpec.describe Karafka::Connection::QueueConsumer do
       let(:target) { nil }
       let(:method_target) { double }
 
-      it 'should do nothing' do
+      it 'does nothing' do
         allow(subject)
           .to receive(:target)
           .and_return(method_target)
@@ -190,7 +230,7 @@ RSpec.describe Karafka::Connection::QueueConsumer do
     context 'when target is existing and we can close it' do
       let(:target) { double }
 
-      it 'should just reload and close it' do
+      it 'just reloads and close it' do
         expect(target)
           .to receive(:reload)
 
@@ -219,7 +259,7 @@ RSpec.describe Karafka::Connection::QueueConsumer do
             .and_raise(error)
         end
 
-        it 'should delete @target assignment so new target will be created' do
+        it 'deletes @target assignment so new target will be created' do
           subject.send(:close)
           expect(subject.instance_variable_get(:@target)).to eq nil
         end

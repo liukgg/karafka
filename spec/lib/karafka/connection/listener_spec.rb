@@ -11,6 +11,11 @@ RSpec.describe Karafka::Connection::Listener do
   subject { described_class.new(route) }
 
   describe '#fetch' do
+    let(:queue_consumer) { double }
+    let(:_partition) { double }
+    let(:incoming_message) { double }
+    let(:messages_bulk) { [incoming_message] }
+
     let(:action) { double }
     [
       StandardError,
@@ -26,7 +31,7 @@ RSpec.describe Karafka::Connection::Listener do
             .with(described_class, error)
         end
 
-        it 'should notice the error wthout closing the consumer' do
+        it 'notices the error wthout closing the consumer' do
           expect(subject)
             .to receive(:queue_consumer)
             .and_raise(error.new)
@@ -40,12 +45,13 @@ RSpec.describe Karafka::Connection::Listener do
     end
 
     context 'when no errors occur' do
-      let(:queue_consumer) { double }
-      let(:_partition) { double }
-      let(:messages_bulk) { [incoming_message] }
-      let(:incoming_message) { double }
+      before do
+        expect(Karafka::App)
+          .to receive(:running?)
+          .and_return(true)
+      end
 
-      it 'should yield for each incoming message' do
+      it 'expect to yield for each incoming message and return last one' do
         expect(subject)
           .to receive(:queue_consumer)
           .and_return(queue_consumer)
@@ -54,11 +60,39 @@ RSpec.describe Karafka::Connection::Listener do
         expect(queue_consumer)
           .to receive(:fetch)
           .and_yield(_partition, messages_bulk)
+
         expect(action)
           .to receive(:call)
           .with(incoming_message)
 
-        subject.send(:fetch, action)
+        expect(subject.send(:fetch, action)).to eq incoming_message
+      end
+    end
+
+    context 'when app is no longer running' do
+      let(:messages_bulk) { [incoming_message, double] }
+
+      before do
+        expect(Karafka::App)
+          .to receive(:running?)
+          .and_return(false)
+      end
+
+      it 'expect to process first message and then return it' do
+        expect(subject)
+          .to receive(:queue_consumer)
+          .and_return(queue_consumer)
+          .at_least(:once)
+
+        expect(queue_consumer)
+          .to receive(:fetch)
+          .and_yield(_partition, messages_bulk)
+
+        expect(action)
+          .to receive(:call)
+          .with(incoming_message)
+
+        expect(subject.send(:fetch, action)).to eq incoming_message
       end
     end
   end
@@ -71,7 +105,7 @@ RSpec.describe Karafka::Connection::Listener do
         subject.instance_variable_set(:'@queue_consumer', queue_consumer)
       end
 
-      it 'should just return it' do
+      it 'just returns it' do
         expect(Poseidon::ConsumerGroup)
           .to receive(:new)
           .never
@@ -86,7 +120,7 @@ RSpec.describe Karafka::Connection::Listener do
         subject.instance_variable_set(:'@queue_consumer', nil)
       end
 
-      it 'should create an instance and return' do
+      it 'creates an instance and return' do
         expect(Karafka::Connection::QueueConsumer)
           .to receive(:new)
           .with(route)

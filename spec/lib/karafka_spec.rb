@@ -3,80 +3,15 @@ require 'spec_helper'
 RSpec.describe Karafka do
   subject { described_class }
 
-  before do
-    @logger = subject.logger
-  end
-
-  after do
-    subject.logger = @logger
-  end
-
-  describe '#logger=' do
-    let(:logger) { double }
-
-    it 'should assign logger' do
-      subject.logger = logger
-      expect(subject.instance_variable_get(:'@logger')).to eq logger
+  describe '.logger' do
+    it 'expect to use app logger' do
+      expect(subject.logger).to eq described_class::App.config.logger
     end
   end
 
-  describe '#monitor' do
-    context 'when monitor is already set' do
-      let(:monitor) { double }
-
-      before do
-        subject.instance_variable_set(:'@monitor', monitor)
-      end
-
-      it 'should use monitor that was defined' do
-        expect(subject.monitor).to eq monitor
-      end
-    end
-
-    context 'when monitor is not provided' do
-      let(:monitor) { double }
-
-      before do
-        subject.instance_variable_set(:'@monitor', nil)
-      end
-
-      it 'should build a default monitor' do
-        expect(Karafka::Monitor)
-          .to receive(:instance)
-          .and_return(monitor)
-
-        expect(subject.monitor).to eq monitor
-      end
-    end
-  end
-
-  describe '#monitor' do
-    context 'when monitor is already set' do
-      let(:monitor) { double }
-
-      before do
-        subject.instance_variable_set(:'@monitor', monitor)
-      end
-
-      it 'should use monitor that was defined' do
-        expect(subject.monitor).to eq monitor
-      end
-    end
-
-    context 'when monitor is not provided' do
-      let(:monitor) { double }
-
-      before do
-        subject.instance_variable_set(:'@monitor', nil)
-      end
-
-      it 'should build a default monitor' do
-        expect(Karafka::Monitor)
-          .to receive(:instance)
-          .and_return(monitor)
-
-        expect(subject.monitor).to eq monitor
-      end
+  describe '.monitor' do
+    it 'expect to use app monitor' do
+      expect(subject.monitor).to eq described_class::App.config.monitor
     end
   end
 
@@ -112,7 +47,7 @@ RSpec.describe Karafka do
 
     context 'when KARAFKA_BOOT_FILE is not defined' do
       let(:boot_file) { nil }
-      let(:default) { File.join(Karafka.root, 'app.rb') }
+      let(:default) { File.join(described_class.root, 'app.rb') }
 
       it 'expect to use default one' do
         expect(subject.boot_file).to eq Pathname.new(default)

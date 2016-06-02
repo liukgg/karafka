@@ -2,6 +2,7 @@
 
 [![Build Status](https://travis-ci.org/karafka/karafka.png)](https://travis-ci.org/karafka/karafka)
 [![Code Climate](https://codeclimate.com/github/karafka/karafka/badges/gpa.svg)](https://codeclimate.com/github/karafka/karafka)
+[![Join the chat at https://gitter.im/karafka/karafka](https://badges.gitter.im/karafka/karafka.svg)](https://gitter.im/karafka/karafka?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
 Microframework used to simplify Apache Kafka based Ruby applications development.
 
@@ -15,6 +16,7 @@ Microframework used to simplify Apache Kafka based Ruby applications development
     - [WaterDrop](#waterdrop)
     - [Configurators](#configurators)
     - [Environment variables settings](#environment-variables-settings)
+    - [Kafka brokers auto-discovery](#kafka-brokers-auto-discovery)
   - [Usage](#usage)
     - [Karafka CLI](#karafka-cli)
     - [Routing](#routing)
@@ -73,30 +75,27 @@ bundle exec karafka install
 ### Application
 Karafka has following configuration options:
 
-| Option                 | Required | Value type        | Description                                                                 |
-|------------------------|----------|-------------------|-----------------------------------------------------------------------------|
-| kafka_hosts            | true     | Array<String>     | Kafka server hosts                                                          |
-| logger                 | false    | Object            | Logger instance (defaults to Karafka::Logger)                               |
-| max_concurrency        | true     | Integer           | How many threads maximally should we have that listen for incoming messages |
-| monitor                | false    | Object            | Monitor instance (defaults to Karafka::Monitor)                             |
-| name                   | true     | String            | Application name                                                            |
-| redis                  | true     | Hash              | Hash with Redis configuration options                                       |
-| wait_timeout           | true     | Integer (Seconds) | How long do we wait for incoming messages on a single socket (topic)        |
-| worker_timeout         | true     | Integer (Seconds) | How long a task can run in Sidekiq before it will be terminated             |
-| zookeeper_hosts        | true     | Array<String>     | Zookeeper server hosts                                                      |
+| Option                 | Required | Value type        | Description                                                                                 |
+|------------------------|----------|-------------------|---------------------------------------------------------------------------------------------|
+| max_concurrency        | true     | Integer           | How many threads maximally should we have that listen for incoming messages                 |
+| name                   | true     | String            | Application name                                                                            |
+| redis                  | true     | Hash              | Hash with Redis configuration options                                                       |
+| wait_timeout           | true     | Integer (Seconds) | How long do we wait for incoming messages on a single socket (topic)                        |
+| monitor                | false    | Object            | Monitor instance (defaults to Karafka::Monitor)                                             |
+| logger                 | false    | Object            | Logger instance (defaults to Karafka::Logger)                                               |
+| zookeeper.hosts        | true     | Array<String>     | Zookeeper server hosts                                                                      |
+| kafka.hosts            | false    | Array<String>     | Kafka server hosts - if not provided Karafka will autodiscover them based on Zookeeper data |
 
 To apply this configuration, you need to use a *setup* method from the Karafka::App class (app.rb):
 
 ```ruby
 class App < Karafka::App
   setup do |config|
-    config.kafka_hosts = %w( 127.0.0.1:9092 127.0.0.1:9093 )
-    config.zookeeper_hosts =  %w( 127.0.0.1:2181 )
+    config.zookeeper.hosts =  %w( 127.0.0.1:2181 )
     config.redis = {
       url: 'redis://redis.example.com:7372/1'
     }
     config.wait_timeout = 10 # 10 seconds
-    config.worker_timeout =  3600 # 1 hour
     config.max_concurrency = 10 # 10 threads max
     config.name = 'my_application'
     config.logger = MyCustomLogger.new # not required
@@ -133,6 +132,10 @@ There are several env settings you can use:
 |-------------------|-----------------|-------------------------------------------------------------------------------|
 | KARAFKA_ENV       | development     | In what mode this application should boot (production/development/test/etc)   |
 | KARAFKA_BOOT_FILE | app_root/app.rb | Path to a file that contains Karafka app configuration and booting procedures |
+
+### Kafka brokers auto-discovery
+
+Karafka supports Kafka brokers auto-discovery during both startup and runtime. It means that **zookeeper_hosts** option allows Karafka to get all the details it needs about Kafka brokers, first during boot and after each failure. If something happens to a connection on which we were listening (or if we cannot connect to a given broker), Karafka will refresh list of available brokers. This allows it to be aware of changes that happen in the infrastructure (adding and removing nodes) and allows it to be up and running as long as Zookeeper is able to provide it all the required information.
 
 ## Usage
 
@@ -223,7 +226,7 @@ Optionally you can use **group** method to define group for this topic. Use it i
 ```ruby
 topic :incoming_messages do
   group :load_balanced_group
-  controler MessagesController
+  controller MessagesController
 end
 ```
 
@@ -241,7 +244,7 @@ However, if you want to use a raw Sidekiq worker (without any Karafka additional
 
 ```ruby
 topic :incoming_messages do
-  controler MessagesController
+  controller MessagesController
   worker MyCustomController
 end
 ```
@@ -419,14 +422,20 @@ end
 Here's a simple example of monitor that is used to handle events and errors logging into NewRelic. It will send metrics with information about amount of processed messages per topic and how many of them were scheduled to be performed async.
 
 ```ruby
+# NewRelic example monitor for Karafka
 class AppMonitor < Karafka::Monitor
+  # @param [Class] caller class for this notice
+  # @param [Hash] hash with options for this notice
   def notice(caller_class, options = {})
+    # Use default Karafka monitor logging
     super
-    action = :"notice_#{caller_label}"
-    return unless respond_to?(action, true)
-    send(action, caller_class, options)
+    # Handle differently proper actions that we want to monit with NewRelic
+    return unless respond_to?(caller_label, true)
+    send(caller_label, options[:topic])
   end
 
+  # @param [Class] caller class for this notice error
+  # @param e [Exception] error that happened
   def notice_error(caller_class, e)
     super
     NewRelic::Agent.notice_error(e)
@@ -434,18 +443,35 @@ class AppMonitor < Karafka::Monitor
 
   private
 
-  def notice_consume(_caller_class, options)
-    record_count metric_key(options[:controller_class], __method__)
+  # Log that messages for a given topic were consumed
+  # @param topic [String] topic name
+  def consume(topic)
+    record_count metric_key(topic, __method__)
   end
 
-  def notice_perform_async(caller_class, _options)
-    record_count metric_key(caller_class, __method__)
+  # Log that message for topic were scheduled to be performed async
+  # @param topic [String] topic name
+  def perform_async(topic)
+    record_count metric_key(topic, __method__)
   end
 
-  def metric_key(caller_class, method_name)
-    "Custom/#{caller_class.topic}/#{method_name}"
+  # Log that message for topic were performed async
+  # @param topic [String] topic name
+  def perform(topic)
+    record_count metric_key(topic, __method__)
   end
 
+  # @param topic [String] topic name
+  # @param action [String] action that we want to log (consume/perform_async/perform)
+  # @return [String] a proper metric key for NewRelic
+  # @example
+  #   metric_key('videos', 'perform_async') #=> 'Custom/videos/perform_async'
+  def metric_key(topic, action)
+    "Custom/#{topic}/#{action}"
+  end
+
+  # Records occurence of a given event
+  # @param [String] key under which we want to log
   def record_count(key)
     NewRelic::Agent.record_metric(key, count: 1)
   end
